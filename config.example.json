@@ -1,0 +1,12 @@
+{
+  "outer_radius": 220,
+  "inner_radius": 70,
+  "items": [
+    { "label": "Zen",      "icon": "🧘", "exec": ["zen-browser", "zen"] },
+    { "label": "Brave",    "icon": "🦁", "exec": ["brave", "brave-browser"] },
+    { "label": "Chrome",   "icon": "🌐", "exec": ["google-chrome-stable", "chromium", "google-chrome"] },
+    { "label": "Terminal", "icon": "💻", "exec": ["xdg-terminal-exec", "$TERMINAL", "alacritty", "kitty", "foot", "ghostty", "wezterm"] },
+    { "label": "Files",    "icon": "📁", "exec": ["nautilus", "thunar", "dolphin", "nemo", "pcmanfm", "xdg-open ~"] },
+    { "label": "YouTube",  "icon": "▶", "exec": ["xdg-open https://youtube.com"] }
+  ]
+}

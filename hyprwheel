@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""hyprwheel - GTA5-style radial app launcher for Hyprland.
+
+Usage:
+  hyprwheel            open the wheel at the cursor
+  hyprwheel --desktop  open only if the cursor is over an empty desktop
+                       (bind with Hyprland's non-consuming `bindn`)
+"""
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gdk, Gtk, GtkLayerShell, Pango, PangoCairo  # noqa: E402
+
+CONFIG_PATH = os.path.expanduser("~/.config/hyprwheel/config.json")
+
+DEFAULT_CONFIG = {
+    "outer_radius": 220,
+    "inner_radius": 70,
+    "items": [
+        {"label": "Zen", "icon": "\U0001f9d8", "exec": ["zen-browser", "zen"]},
+        {"label": "Brave", "icon": "\U0001f981", "exec": ["brave", "brave-browser"]},
+        {"label": "Chrome", "icon": "\U0001f310",
+         "exec": ["google-chrome-stable", "chromium", "google-chrome"]},
+        {"label": "Terminal", "icon": "\U0001f4bb",
+         "exec": ["xdg-terminal-exec", "$TERMINAL", "alacritty", "kitty",
+                  "foot", "ghostty", "wezterm"]},
+        {"label": "Files", "icon": "\U0001f4c1",
+         "exec": ["nautilus", "thunar", "dolphin", "nemo", "pcmanfm",
+                  "xdg-open ~"]},
+        {"label": "YouTube", "icon": "\u25b6",
+         "exec": ["xdg-open https://youtube.com"]},
+    ],
+}
+
+
+def hyprctl(*args):
+    out = subprocess.run(["hyprctl", "-j", *args], capture_output=True, text=True)
+    return json.loads(out.stdout)
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            user = json.load(f)
+    except FileNotFoundError:
+        return DEFAULT_CONFIG
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"hyprwheel: bad config {CONFIG_PATH}: {e}", file=sys.stderr)
+        return DEFAULT_CONFIG
+    cfg = dict(DEFAULT_CONFIG)
+    cfg.update(user)
+    return cfg
+
+
+def resolve(candidates):
+    """First candidate whose binary exists. '$TERMINAL' expands from env."""
+    for cand in candidates:
+        cand = os.path.expandvars(os.path.expanduser(cand))
+        if "$" in cand:
+            continue  # unset env var
+        if shutil.which(cand.split()[0]):
+            return cand
+    return None
+
+
+def cursor_over_desktop():
+    """True if the cursor is on an empty spot: no window, no top/overlay layer."""
+    cur = hyprctl("cursorpos")
+    cx, cy = cur["x"], cur["y"]
+    monitors = hyprctl("monitors")
+    active_ws = set()
+    for m in monitors:
+        active_ws.add(m["activeWorkspace"]["id"])
+        if m.get("specialWorkspace", {}).get("id"):
+            active_ws.add(m["specialWorkspace"]["id"])
+    for c in hyprctl("clients"):
+        if not c.get("mapped") or c.get("hidden"):
+            continue
+        if c["workspace"]["id"] not in active_ws:
+            continue
+        x, y = c["at"]
+        w, h = c["size"]
+        if x <= cx <= x + w and y <= cy <= y + h:
+            return False
+    layers = hyprctl("layers")
+    for mon in layers.values():
+        for level in ("2", "3"):  # top, overlay
+            for s in mon.get("levels", {}).get(level, []):
+                if (s["x"] <= cx <= s["x"] + s["w"]
+                        and s["y"] <= cy <= s["y"] + s["h"]):
+                    return False
+    return True
+
+
+def focused_monitor_geometry():
+    """(logical_w, logical_h, cursor_local_x, cursor_local_y) on focused monitor."""
+    cur = hyprctl("cursorpos")
+    mon = next(m for m in hyprctl("monitors") if m["focused"])
+    scale = mon["scale"] or 1.0
+    w, h = mon["width"] / scale, mon["height"] / scale
+    if mon.get("transform", 0) % 2 == 1:
+        w, h = h, w
+    return w, h, cur["x"] - mon["x"], cur["y"] - mon["y"]
+
+
+class Wheel(Gtk.Window):
+    def __init__(self, cfg):
+        super().__init__()
+        self.outer = cfg["outer_radius"]
+        self.inner = cfg["inner_radius"]
+        self.items = [
+            {**it, "cmd": resolve(it["exec"])} for it in cfg["items"]
+        ]
+        self.hover = -1
+
+        w, h, cx, cy = focused_monitor_geometry()
+        margin = self.outer + 20
+        self.cx = min(max(cx, margin), w - margin)
+        self.cy = min(max(cy, margin), h - margin)
+
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_namespace(self, "hyprwheel")
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.EXCLUSIVE)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM,
+                     GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                        | Gdk.EventMask.POINTER_MOTION_MASK
+                        | Gdk.EventMask.KEY_PRESS_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_click)
+        self.connect("motion-notify-event", self.on_motion)
+        self.connect("key-press-event", self.on_key)
+
+    # --- geometry -------------------------------------------------------
+    def slice_at(self, x, y):
+        dx, dy = x - self.cx, y - self.cy
+        dist = math.hypot(dx, dy)
+        if not (self.inner <= dist <= self.outer):
+            return -1
+        n = len(self.items)
+        ang = math.atan2(dy, dx) + math.pi / 2 + math.pi / n  # slice 0 at top
+        return int(ang % (2 * math.pi) / (2 * math.pi) * n)
+
+    def slice_angles(self, i):
+        n = len(self.items)
+        start = -math.pi / 2 - math.pi / n + i * 2 * math.pi / n
+        return start, start + 2 * math.pi / n
+
+    # --- events ---------------------------------------------------------
+    def on_motion(self, _w, ev):
+        h = self.slice_at(ev.x, ev.y)
+        if h != self.hover:
+            self.hover = h
+            self.queue_draw()
+
+    def on_click(self, _w, ev):
+        i = self.slice_at(ev.x, ev.y)
+        if i >= 0 and self.items[i]["cmd"]:
+            subprocess.Popen(self.items[i]["cmd"], shell=True,
+                             start_new_session=True)
+        Gtk.main_quit()
+
+    def on_key(self, _w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+
+    # --- drawing --------------------------------------------------------
+    def on_draw(self, _w, cr):
+        cr.set_source_rgba(0, 0, 0, 0.35)  # dim the screen, GTA style
+        cr.paint()
+        gap = 0.012
+        for i, item in enumerate(self.items):
+            a0, a1 = self.slice_angles(i)
+            a0, a1 = a0 + gap, a1 - gap
+            cr.new_path()
+            cr.arc(self.cx, self.cy, self.outer, a0, a1)
+            cr.arc_negative(self.cx, self.cy, self.inner, a1, a0)
+            cr.close_path()
+            if i == self.hover and item["cmd"]:
+                cr.set_source_rgba(0.85, 0.85, 0.9, 0.95)
+            elif item["cmd"]:
+                cr.set_source_rgba(0.08, 0.08, 0.1, 0.88)
+            else:
+                cr.set_source_rgba(0.08, 0.08, 0.1, 0.4)  # missing app
+            cr.fill()
+
+            mid = (a0 + a1) / 2
+            r = (self.inner + self.outer) / 2
+            tx, ty = self.cx + r * math.cos(mid), self.cy + r * math.sin(mid)
+            dark = i == self.hover and item["cmd"]
+            fg = ((0.1, 0.1, 0.12, 1) if dark else
+                  (0.95, 0.95, 0.95, 1 if item["cmd"] else 0.5))
+            self.draw_text(cr, item["icon"], tx, ty - 14, 20, fg)
+            self.draw_text(cr, item["label"], tx, ty + 16, "bold 10", fg)
+
+        # center hub
+        cr.arc(self.cx, self.cy, self.inner - 12, 0, 2 * math.pi)
+        cr.set_source_rgba(0.08, 0.08, 0.1, 0.92)
+        cr.fill()
+        label = (self.items[self.hover]["label"]
+                 if self.hover >= 0 else "hyprwheel")
+        self.draw_text(cr, label, self.cx, self.cy, "bold 10",
+                       (0.95, 0.95, 0.95, 1))
+
+    def draw_text(self, cr, text, x, y, font, rgba):
+        layout = PangoCairo.create_layout(cr)
+        layout.set_font_description(Pango.FontDescription(f"sans {font}"))
+        layout.set_text(text, -1)
+        w, h = layout.get_pixel_size()
+        cr.set_source_rgba(*rgba)
+        cr.move_to(x - w / 2, y - h / 2)
+        PangoCairo.show_layout(cr, layout)
+
+
+def main():
+    if "--desktop" in sys.argv and not cursor_over_desktop():
+        return
+    # single instance: second invocation while open just closes the first
+    lock = os.path.expanduser("~/.cache/hyprwheel.pid")
+    try:
+        with open(lock) as f:
+            os.kill(int(f.read()), 15)
+        os.unlink(lock)
+        return  # toggled off
+    except (OSError, ValueError):
+        pass
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    with open(lock, "w") as f:
+        f.write(str(os.getpid()))
+    try:
+        win = Wheel(load_config())
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        Gtk.main()
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

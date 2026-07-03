@@ -12,6 +12,10 @@ pick a slice to launch your browser, terminal, file manager, or anything else.
 - Missing apps show as dimmed slices
 - Right-click again or press `Esc` to close
 
+## Demo
+
+<video src="hyprwheel.mp4" controls width="100%"></video>
+
 ## Requirements
 
 - Hyprland ≥ 0.41 (for the `bindn` non-consuming bind flag)

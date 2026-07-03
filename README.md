@@ -14,7 +14,7 @@ pick a slice to launch your browser, terminal, file manager, or anything else.
 
 ## Demo
 
-<video src="hyprwheel.mp4" controls width="100%"></video>
+<video src="https://github.com/Sahildhillon0/hyprwheel/blob/main/hyprwheel.mp4" controls width="100%"></video>
 
 ## Requirements
 

@@ -142,10 +142,12 @@ class Wheel(Gtk.Window):
             self.set_visual(visual)
 
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                        | Gdk.EventMask.BUTTON_RELEASE_MASK
                         | Gdk.EventMask.POINTER_MOTION_MASK
                         | Gdk.EventMask.KEY_PRESS_MASK)
         self.connect("draw", self.on_draw)
-        self.connect("button-press-event", self.on_click)
+        self.connect("button-press-event", self.on_press)
+        self.connect("button-release-event", self.on_release)
         self.connect("motion-notify-event", self.on_motion)
         self.connect("key-press-event", self.on_key)
 
@@ -171,12 +173,23 @@ class Wheel(Gtk.Window):
             self.hover = h
             self.queue_draw()
 
-    def on_click(self, _w, ev):
-        i = self.slice_at(ev.x, ev.y)
-        if i >= 0 and self.items[i]["cmd"]:
-            subprocess.Popen(self.items[i]["cmd"], shell=True,
-                             start_new_session=True)
-        Gtk.main_quit()
+    def on_press(self, _w, ev):
+        if ev.button == 1:  # left-click → launch immediately
+            i = self.slice_at(ev.x, ev.y)
+            if i >= 0 and self.items[i]["cmd"]:
+                subprocess.Popen(self.items[i]["cmd"], shell=True,
+                                 start_new_session=True)
+            Gtk.main_quit()
+        return True  # consume every press
+
+    def on_release(self, _w, ev):
+        if ev.button == 3:  # right-click release → launch hovered slice
+            i = self.slice_at(ev.x, ev.y)
+            if i >= 0 and self.items[i]["cmd"]:
+                subprocess.Popen(self.items[i]["cmd"], shell=True,
+                                 start_new_session=True)
+            Gtk.main_quit()
+        return True  # consume every release
 
     def on_key(self, _w, ev):
         if ev.keyval == Gdk.KEY_Escape:
